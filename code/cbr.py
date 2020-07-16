@@ -5,13 +5,15 @@ from tqdm import tqdm
 from collections import defaultdict
 import pickle
 import torch
-from code.data.data_utils import create_vocab, load_data, get_unique_entities, \
+from code.data.data_utils import create_vocab,create_adj_list, load_data, get_unique_entities, \
     read_graph, get_entities_group_by_relation, get_inv_relation, load_data_all_triples
 from typing import *
 import logging
 import json
 import sys
 import wandb
+import networkx as nx
+import itertools
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -25,7 +27,7 @@ logger.addHandler(ch)
 
 class CBR(object):
     def __init__(self, args, train_map, eval_map, entity_vocab, rev_entity_vocab, rel_vocab, rev_rel_vocab, eval_vocab,
-                 eval_rev_vocab, all_paths, rel_ent_map):
+                 eval_rev_vocab, adj_list, rel_ent_map):
         self.args = args
         self.eval_map = eval_map
         self.train_map = train_map
@@ -33,9 +35,29 @@ class CBR(object):
         self.all_num_ret_nn = []
         self.entity_vocab, self.rev_entity_vocab, self.rel_vocab, self.rev_rel_vocab = entity_vocab, rev_entity_vocab, rel_vocab, rev_rel_vocab
         self.eval_vocab, self.eval_rev_vocab = eval_vocab, eval_rev_vocab
-        self.all_paths = all_paths
+        self.adj_list = adj_list
         self.rel_ent_map = rel_ent_map
         self.num_non_executable_programs = []
+        self.index_adj_list, self.g, self.etypes = CBR.get_indexed_adj_list(adj_list,
+                                                                     entity_vocab,
+                                                                     rel_vocab)
+    @staticmethod
+    def get_indexed_adj_list(adj_list, entity_vocab, rel_vocab):
+        # Do not need multidigraph or digraph since we only
+        # want paths
+        g = nx.Graph()
+        g.add_nodes_from([v for k, v in entity_vocab.items()])
+        new_adj_list = {entity_vocab[k]: [(rel_vocab[r],entity_vocab[e]) for r,e in v] for k, v in adj_list.items()}
+        for k, v in entity_vocab.items():
+            if v not in new_adj_list:
+                new_adj_list[v] = []
+        etypes = defaultdict(list)
+        for k, l in new_adj_list.items():
+            g.add_edges_from([(k,e2) for r, e2 in l])
+            for r, e2 in l:
+                etypes[k, e2].append(r)
+
+        return new_adj_list, g, etypes
 
     def set_nearest_neighbor_1_hop(self, nearest_neighbor_1_hop):
         self.nearest_neighbor_1_hop = nearest_neighbor_1_hop
@@ -71,17 +93,38 @@ class CBR(object):
             return None
         return nearest_entities
 
-    def get_programs(self, e: str, ans: str, all_paths_around_e: List[List[str]]):
+    def get_all_path_variants(self, path):
+        """ There may be multiedges"""
+        if len(path) == 2:
+            for x in self.etypes[path[0], path[1]]:
+                yield[x]
+        else:
+            for r in self.etypes[path[0], path[1]]:
+                for p in self.get_all_path_variants(path[1:]):
+                    yield [r] + p
+
+    def get_programs(self, e: str, ans: str, max_len:Optional[int]=3):
         """
         Given an entity and answer, get all paths? which end at that ans node in the subgraph surrounding e
         """
-        all_programs = []
-        for path in all_paths_around_e:
-            for l, (r, e_dash) in enumerate(path):
-                if e_dash == ans:
-                    # get the path till this point
-                    all_programs.append([x for (x, _) in path[:l + 1]])  # we only need to keep the relations
-        return all_programs
+        e0 = self.entity_vocab[e]
+        targetset = set([self.entity_vocab[x] for x in ans])
+        entity_paths = nx.all_simple_paths(self.g, e0, targetset, \
+                                            cutoff=max_len)
+        rel_paths = set()
+        for path in entity_paths:
+            for var in self.get_all_path_variants(path):
+                rel_paths.add(tuple(var))
+        programs = [tuple([self.rev_rel_vocab[x] for x in p]) for p in rel_paths]
+
+        return programs 
+        # all_programs = []
+        # for path in all_paths_around_e:
+        #     for l, (r, e_dash) in enumerate(path):
+        #         if e_dash == ans:
+        #             # get the path till this point
+        #             all_programs.append([x for (x, _) in path[:l + 1]])  # we only need to keep the relations
+        # return all_programs
 
     def get_programs_from_nearest_neighbors(self, e1: str, r: str, nn_func: Callable, num_nn: Optional[int] = 5):
         all_programs = []
@@ -93,10 +136,11 @@ class CBR(object):
         zero_ctr = 0
         for e in nearest_entities:
             if len(self.train_map[(e, r)]) > 0:
-                paths_e = self.all_paths[e]  # get the collected 3 hop paths around e
+                # paths_e = self.all_paths[e]  # get the collected 3 hop paths around e
                 nn_answers = self.train_map[(e, r)]
-                for nn_ans in nn_answers:
-                    all_programs += self.get_programs(e, nn_ans, paths_e)
+                all_programs += self.get_programs(e, nn_answers)
+                # for nn_ans in nn_answers:
+                #     all_programs += self.get_programs(e, nn_ans, paths_e)
             elif len(self.train_map[(e, r)]) == 0:
                 zero_ctr += 1
         self.all_zero_ctr.append(zero_ctr)
@@ -356,6 +400,7 @@ def main(args):
     data_dir = os.path.join(args.data_dir, "data", dataset_name)
     subgraph_dir = os.path.join(args.data_dir, "subgraphs", dataset_name)
     kg_file = os.path.join(data_dir, "graph.txt")
+    train_adj_list = create_adj_list(os.path.join(data_dir, 'graph.txt'))
 
     args.dev_file = os.path.join(data_dir, "dev.txt")
     args.test_file = os.path.join(data_dir, "test.txt") if not args.test_file_name \
@@ -366,8 +411,6 @@ def main(args):
     args.train_file = os.path.join(data_dir, "train.txt")
 
     logger.info("Loading subgraph around entities:")
-    with open(os.path.join(subgraph_dir, args.subgraph_file_name), "rb") as fin:
-        all_paths = pickle.load(fin)
 
     entity_vocab, rev_entity_vocab, rel_vocab, rev_rel_vocab = create_vocab(kg_file)
     logger.info("Loading train map")
@@ -422,7 +465,8 @@ def main(args):
     args.all_kg_map = all_kg_map
 
     symbolically_smart_agent = CBR(args, train_map, eval_map, entity_vocab, rev_entity_vocab, rel_vocab,
-                                                 rev_rel_vocab, eval_vocab, eval_rev_vocab, all_paths, rel_ent_map)
+                                                 rev_rel_vocab, eval_vocab,
+                                   eval_rev_vocab, train_adj_list, rel_ent_map)
 
     query_ind = torch.LongTensor(query_ind).to(device)
     # Calculate similarity
