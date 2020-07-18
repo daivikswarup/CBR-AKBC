@@ -111,16 +111,6 @@ class CBR(object):
         """
         Given an entity and answer, get all paths? which end at that ans node in the subgraph surrounding e
         """
-        # e0 = self.entity_vocab[e]
-        # targetset = set([self.entity_vocab[x] for x in ans])
-        # entity_paths = nx.all_simple_paths(self.g, e0, targetset, \
-        #                                     cutoff=max_len)
-        # rel_paths = []
-        # for path in entity_paths:
-        #     for var in self.get_all_path_variants(path):
-        #         rel_paths.append(tuple(var))
-        # programs = [tuple([self.rev_rel_vocab[x] for x in p]) for p in rel_paths]
-        # return programs
 
         start_node = self.entity_vocab[e]
         train_adj_list = self.index_adj_list
@@ -138,7 +128,6 @@ class CBR(object):
                 out_edge_idx = np.random.randint(len(outgoing_edges))
                 # assign curr_node as the node of the selected edge
                 r, curr_node = outgoing_edges[out_edge_idx]
-                # entity_path.append(curr_node)
                 path.append((r,curr_node))
             pathset.add(tuple(path))
         for p in pathset:
@@ -160,23 +149,12 @@ class CBR(object):
         zero_ctr = 0
         for e in nearest_entities:
             if len(self.train_map[(e, r)]) > 0:
-                # paths_e = self.all_paths[e]  # get the collected 3 hop paths around e
                 nn_answers = self.train_map[(e, r)]
                 all_programs.extend(self.get_programs(e, nn_answers))
-                # for nn_ans in nn_answers:
-                #     all_programs += self.get_programs(e, nn_ans, paths_e)
             elif len(self.train_map[(e, r)]) == 0:
                 zero_ctr += 1
         self.all_zero_ctr.append(zero_ctr)
         return all_programs
-        # check
-        n_programs = 1000
-        resampled_programs = []
-        for program_list in all_programs:
-            if len(program_list):
-                resampled_programs.extend(resample(program_list,\
-                                                   n_samples=n_programs))
-        return resampled_programs
 
     def rank_programs(self, list_programs: List[str]) -> List[str]:
         """
@@ -511,7 +489,7 @@ def main(args):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Collect subgraphs around entities")
+    parser = argparse.ArgumentParser(description="Run CBR")
     parser.add_argument("--dataset_name", type=str, help="The dataset name. Replace with one of FB122 | WN18RR | NELL-995 to reproduce the results of the paper")
     parser.add_argument("--data_dir", type=str, default="./cbr-akbc-data/")
     parser.add_argument("--test", action="store_true")
