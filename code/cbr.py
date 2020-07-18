@@ -14,7 +14,6 @@ import sys
 import wandb
 import networkx as nx
 import itertools
-from sklearn.utils import resample
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -103,9 +102,6 @@ class CBR(object):
             for r in self.etypes[path[0], path[1]]:
                 for p in self.get_all_path_variants(path[1:]):
                     yield [r] + p
-    def dfs(self, start, adj_list, targets, max_len):
-        q = deque()
-
 
     def get_programs(self, e: str, ans: str, max_len:Optional[int]=3):
         """
