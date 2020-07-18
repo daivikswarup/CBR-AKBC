@@ -14,6 +14,7 @@ import sys
 import wandb
 import networkx as nx
 import itertools
+from sklearn.utils import resample
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -102,29 +103,52 @@ class CBR(object):
             for r in self.etypes[path[0], path[1]]:
                 for p in self.get_all_path_variants(path[1:]):
                     yield [r] + p
+    def dfs(self, start, adj_list, targets, max_len):
+        q = deque()
+
 
     def get_programs(self, e: str, ans: str, max_len:Optional[int]=3):
         """
         Given an entity and answer, get all paths? which end at that ans node in the subgraph surrounding e
         """
-        e0 = self.entity_vocab[e]
-        targetset = set([self.entity_vocab[x] for x in ans])
-        entity_paths = nx.all_simple_paths(self.g, e0, targetset, \
-                                            cutoff=max_len)
-        rel_paths = set()
-        for path in entity_paths:
-            for var in self.get_all_path_variants(path):
-                rel_paths.add(tuple(var))
-        programs = [tuple([self.rev_rel_vocab[x] for x in p]) for p in rel_paths]
+        # e0 = self.entity_vocab[e]
+        # targetset = set([self.entity_vocab[x] for x in ans])
+        # entity_paths = nx.all_simple_paths(self.g, e0, targetset, \
+        #                                     cutoff=max_len)
+        # rel_paths = []
+        # for path in entity_paths:
+        #     for var in self.get_all_path_variants(path):
+        #         rel_paths.append(tuple(var))
+        # programs = [tuple([self.rev_rel_vocab[x] for x in p]) for p in rel_paths]
+        # return programs
 
-        return programs 
-        # all_programs = []
-        # for path in all_paths_around_e:
-        #     for l, (r, e_dash) in enumerate(path):
-        #         if e_dash == ans:
-        #             # get the path till this point
-        #             all_programs.append([x for (x, _) in path[:l + 1]])  # we only need to keep the relations
-        # return all_programs
+        start_node = self.entity_vocab[e]
+        train_adj_list = self.index_adj_list
+        all_programs = []
+        pathset = set()
+        targetset = set([self.entity_vocab[x] for x in ans])
+        for i in range(self.args.n_paths):    
+            curr_node = start_node
+            path = []
+            for l in range(max_len):
+                outgoing_edges = train_adj_list[curr_node]
+                if len(outgoing_edges) == 0:
+                    break
+                # pick one at random
+                out_edge_idx = np.random.randint(len(outgoing_edges))
+                # assign curr_node as the node of the selected edge
+                r, curr_node = outgoing_edges[out_edge_idx]
+                # entity_path.append(curr_node)
+                path.append((r,curr_node))
+            pathset.add(tuple(path))
+        for p in pathset:
+            for i in range(len(p)):
+                r,e = p[i]
+                if e in targetset:
+                    all_programs.append([self.rev_rel_vocab[r] for r,_ in \
+                                         p[:i+1]])
+        return all_programs
+
 
     def get_programs_from_nearest_neighbors(self, e1: str, r: str, nn_func: Callable, num_nn: Optional[int] = 5):
         all_programs = []
@@ -138,13 +162,21 @@ class CBR(object):
             if len(self.train_map[(e, r)]) > 0:
                 # paths_e = self.all_paths[e]  # get the collected 3 hop paths around e
                 nn_answers = self.train_map[(e, r)]
-                all_programs += self.get_programs(e, nn_answers)
+                all_programs.extend(self.get_programs(e, nn_answers))
                 # for nn_ans in nn_answers:
                 #     all_programs += self.get_programs(e, nn_ans, paths_e)
             elif len(self.train_map[(e, r)]) == 0:
                 zero_ctr += 1
         self.all_zero_ctr.append(zero_ctr)
         return all_programs
+        # check
+        n_programs = 1000
+        resampled_programs = []
+        for program_list in all_programs:
+            if len(program_list):
+                resampled_programs.extend(resample(program_list,\
+                                                   n_samples=n_programs))
+        return resampled_programs
 
     def rank_programs(self, list_programs: List[str]) -> List[str]:
         """
@@ -398,7 +430,6 @@ def main(args):
     dataset_name = args.dataset_name
     logger.info("==========={}============".format(dataset_name))
     data_dir = os.path.join(args.data_dir, "data", dataset_name)
-    subgraph_dir = os.path.join(args.data_dir, "subgraphs", dataset_name)
     kg_file = os.path.join(data_dir, "graph.txt")
     train_adj_list = create_adj_list(os.path.join(data_dir, 'graph.txt'))
 
@@ -409,8 +440,6 @@ def main(args):
         args.test_file = os.path.join(data_dir, "testI.txt")
 
     args.train_file = os.path.join(data_dir, "train.txt")
-
-    logger.info("Loading subgraph around entities:")
 
     entity_vocab, rev_entity_vocab, rel_vocab, rev_rel_vocab = create_vocab(kg_file)
     logger.info("Loading train map")
@@ -485,14 +514,14 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Collect subgraphs around entities")
     parser.add_argument("--dataset_name", type=str, help="The dataset name. Replace with one of FB122 | WN18RR | NELL-995 to reproduce the results of the paper")
     parser.add_argument("--data_dir", type=str, default="./cbr-akbc-data/")
-    parser.add_argument("--subgraph_file_name", type=str,
-                        default="paths_1000.pkl")
     parser.add_argument("--test", action="store_true")
     parser.add_argument("--test_file_name", type=str, default='')
     parser.add_argument("--max_num_programs", type=int, default=15, help="Max number of paths to consider")
     parser.add_argument("--print_paths", action="store_true")
     parser.add_argument("--k_adj", type=int, default=5,
                         help="Number of nearest neighbors to consider based on adjacency matrix")
+    parser.add_argument("--n_paths", type=int, default=1000,
+                        help="Number of paths")
     parser.add_argument("--use_wandb", type=int, choices=[0, 1], default=0, help="Set to 1 if using W&B")
     parser.add_argument("--output_per_relation_scores", action="store_true")
 
