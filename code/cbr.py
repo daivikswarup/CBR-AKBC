@@ -390,6 +390,22 @@ class CBR(object):
                 for rel, _ in learnt_programs[k].items():
                     logger.info((rel, learnt_programs[k][rel]))
                 logger.info("=====" * 2)
+        if args.parallelize:
+            dirname = os.path.join(self.args.output_dir,\
+                                   self.args.dataset_name)
+            if not os.path.exists(dirname):
+                os.makedirs(dirname)
+
+            with open(os.path.join(dirname,\
+                              '{}.json'.format(self.args.splitid))) as f:
+                results = {'hits_1': hits_1,\
+                           'hits_3': hits_3,\
+                           'hits_5': hits_5,\
+                           'hits_10': hits_10,\
+                           'MRR': mrr,\
+                           'total' : total_examples}
+                json.dump(results, f)
+                
         if self.args.use_wandb:
             # Log all metrics
             wandb.log({'hits_1': hits_1 / total_examples, 'hits_3': hits_3 / total_examples,
@@ -427,6 +443,13 @@ def main(args):
     if args.test:
         eval_map = test_map
         eval_file = args.test_file
+
+    if args.parallelize:
+        keys = sorted(list(eval_map.keys()))
+        start = args.splitsize * args.splitid
+        end = start + args.splitsize
+        selected_keys = keys[start:end]
+        eval_map = {k:eval_map[k] for k in selected_keys}
 
     rel_ent_map = get_entities_group_by_relation(args.train_file)
     # Calculate nearest neighbors
@@ -488,9 +511,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run CBR")
     parser.add_argument("--dataset_name", type=str, help="The dataset name. Replace with one of FB122 | WN18RR | NELL-995 to reproduce the results of the paper")
     parser.add_argument("--data_dir", type=str, default="./cbr-akbc-data/")
+    parser.add_argument("--output_dir", type=str, default="./output/")
     parser.add_argument("--test", action="store_true")
+    parser.add_argument("--parallelize", action="store_true")
     parser.add_argument("--test_file_name", type=str, default='')
     parser.add_argument("--max_num_programs", type=int, default=15, help="Max number of paths to consider")
+    parser.add_argument("--splitid", type=int, default=0, help="Split number")
+    parser.add_argument("--splitsize", type=int, default=200, help="Number of queries per split")
     parser.add_argument("--print_paths", action="store_true")
     parser.add_argument("--k_adj", type=int, default=5,
                         help="Number of nearest neighbors to consider based on adjacency matrix")
