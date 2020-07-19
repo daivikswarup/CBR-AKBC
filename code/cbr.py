@@ -397,7 +397,7 @@ class CBR(object):
                 os.makedirs(dirname)
 
             with open(os.path.join(dirname,\
-                              '{}.json'.format(self.args.splitid))) as f:
+                    '{}.json'.format(self.args.splitid)), 'w') as f:
                 results = {'hits_1': hits_1,\
                            'hits_3': hits_3,\
                            'hits_5': hits_5,\
