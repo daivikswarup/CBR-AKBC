@@ -14,7 +14,8 @@ ch.setFormatter(formatter)
 logger.addHandler(ch)
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Run CBR")
+    parser = argparse.ArgumentParser(description="Aggregate scores from all "
+                                     "workers")
     parser.add_argument("--output_dir", type=str, default="./output/")
     parser.add_argument("--dataset_name", type=str, help="The dataset name. Replace with one of FB122 | WN18RR | NELL-995 to reproduce the results of the paper")
     args = parser.parse_args()
