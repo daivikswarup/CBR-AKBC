@@ -395,7 +395,6 @@ class CBR(object):
                                    self.args.dataset_name)
             if not os.path.exists(dirname):
                 os.makedirs(dirname)
-
             with open(os.path.join(dirname,\
                     '{}.json'.format(self.args.splitid)), 'w') as f:
                 results = {'hits_1': hits_1,\
@@ -445,9 +444,19 @@ def main(args):
         eval_file = args.test_file
 
     if args.parallelize:
+        # delete old files
+        dirname = os.path.join(args.output_dir,\
+                                args.dataset_name)
+        if os.path.exists(dirname):
+            for fil in os.listdir(dirname):
+                fid = int(fil.split('.')[0])
+                if fid >= args.num_splits:
+                    os.remove(os.path.join(dirname, fil))
+                 
         keys = sorted(list(eval_map.keys()))
-        start = args.splitsize * args.splitid
-        end = start + args.splitsize
+        splitsize = int(np.ceil(len(keys)/args.num_splits))
+        start = splitsize * args.splitid
+        end = start + splitsize
         selected_keys = keys[start:end]
         eval_map = {k:eval_map[k] for k in selected_keys}
 
@@ -517,7 +526,8 @@ if __name__ == '__main__':
     parser.add_argument("--test_file_name", type=str, default='')
     parser.add_argument("--max_num_programs", type=int, default=15, help="Max number of paths to consider")
     parser.add_argument("--splitid", type=int, default=0, help="Split number")
-    parser.add_argument("--splitsize", type=int, default=200, help="Number of queries per split")
+    parser.add_argument("--num_splits", type=int, default=20, help="Total "
+                                                    "number of workers")
     parser.add_argument("--print_paths", action="store_true")
     parser.add_argument("--k_adj", type=int, default=5,
                         help="Number of nearest neighbors to consider based on adjacency matrix")
