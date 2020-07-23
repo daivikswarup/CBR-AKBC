@@ -1,12 +1,14 @@
 import argparse
 import numpy as np
+from sklearn.preprocessing import normalize
 import os
 from tqdm import tqdm
 from collections import defaultdict
 import pickle
 import torch
 from code.data.data_utils import create_vocab,create_adj_list, load_data, get_unique_entities, \
-    read_graph, get_entities_group_by_relation, get_inv_relation, load_data_all_triples
+    read_graph, get_entities_group_by_relation, get_inv_relation, \
+    load_data_all_triples, read_graph_sparse
 from typing import *
 import logging
 import json
@@ -69,8 +71,9 @@ class CBR(object):
         :param query_entities: b is a batch of indices of query entities
         :return:
         """
-        query_entities_vec = torch.index_select(adj_mat, dim=0, index=query_entities)
-        sim = torch.matmul(query_entities_vec, torch.t(adj_mat))
+        query_mat = adj_mat[query_entities, :]
+        sim = query_mat.dot(adj_mat.transpose())
+        # sim = torch.matmul(query_entities_vec, torch.t(adj_mat))
         return sim
 
     def get_nearest_neighbor_inner_product(self, e1: str, r: str, k: Optional[int] = 5) -> List[str]:
@@ -462,20 +465,11 @@ def main(args):
 
     rel_ent_map = get_entities_group_by_relation(args.train_file)
     # Calculate nearest neighbors
-    adj_mat = read_graph(kg_file, entity_vocab, rel_vocab)
+    adj_mat = read_graph_sparse(kg_file, entity_vocab, rel_vocab, args.ngrams,
+                               args.use_entities)
     adj_mat = np.sqrt(adj_mat)
-    l2norm = np.linalg.norm(adj_mat, axis=-1)
-    l2norm[0] += np.finfo(np.float).eps  # to encounter zero values. These 2 indx are PAD / NULL
-    l2norm[1] += np.finfo(np.float).eps
-    adj_mat = adj_mat / l2norm.reshape(l2norm.shape[0], 1)
+    adj_mat = normalize(adj_mat)
 
-    # Lets put this to GPU
-    adj_mat = torch.from_numpy(adj_mat)
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(device)
-    logger.info('Using device:'.format(device.__str__()))
-    adj_mat = adj_mat.to(device)
 
     # get the unique entities in eval set, so that we can calculate similarity in advance.
     eval_entities = get_unique_entities(eval_file)
@@ -503,12 +497,11 @@ def main(args):
                                                  rev_rel_vocab, eval_vocab,
                                    eval_rev_vocab, train_adj_list, rel_ent_map)
 
-    query_ind = torch.LongTensor(query_ind).to(device)
     # Calculate similarity
+    logger.info('calculating similarity')
     sim = symbolically_smart_agent.calc_sim(adj_mat,
                                             query_ind)  # n X N (n== size of dev_entities, N: size of all entities)
-
-    nearest_neighbor_1_hop = np.argsort(-sim.cpu(), axis=-1)
+    nearest_neighbor_1_hop = np.argsort(-sim.toarray(), axis=-1)
     symbolically_smart_agent.set_nearest_neighbor_1_hop(nearest_neighbor_1_hop)
 
     logger.info("Loaded...")
@@ -531,6 +524,10 @@ if __name__ == '__main__':
     parser.add_argument("--print_paths", action="store_true")
     parser.add_argument("--k_adj", type=int, default=5,
                         help="Number of nearest neighbors to consider based on adjacency matrix")
+    parser.add_argument("--ngrams", type=int, default=2,
+                        help="Lengths of paths for similarity")
+    parser.add_argument("--use_entities", type=int, default=0,
+                        help="Use neighboring entities for similarity")
     parser.add_argument("--n_paths", type=int, default=1000,
                         help="Number of paths")
     parser.add_argument("--use_wandb", type=int, choices=[0, 1], default=0, help="Set to 1 if using W&B")
