@@ -27,6 +27,7 @@ if __name__ == '__main__':
         fname = os.path.join(dirname, fil)
         with open(fname, 'r') as f:
             data = json.load(f)
+            print(data['MRR']/data['total'])
             hits_1 += data['hits_1']
             hits_3 += data['hits_3']
             hits_5 += data['hits_5']
