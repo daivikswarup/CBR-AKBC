@@ -1,5 +1,7 @@
 import argparse
+import random
 import numpy as np
+from collections import deque
 import os
 from tqdm import tqdm
 from collections import defaultdict
@@ -14,6 +16,8 @@ import sys
 import wandb
 import networkx as nx
 import itertools
+from sklearn.linear_model import LogisticRegression
+from scipy.sparse import csr_matrix
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -133,7 +137,78 @@ class CBR(object):
                     all_programs.append([self.rev_rel_vocab[r] for r,_ in \
                                          p[:i+1]])
         return all_programs
+    
+    def get_data_single(self, e, ans, max_len=3):
+        e = self.entity_vocab[e]
+        ans = set([self.entity_vocab[x] for x in ans])
+        q = deque()
+        q.append((e, ()))
+        pathsets = defaultdict(set)
+        while len(q):
+            nd, path = q.popleft()
+            # ignore trivial path
+            pathsets[nd].add(path)
+            if len(path) == max_len:
+                continue
+            for r, nxt in self.index_adj_list[nd]:
+                q.append((nxt, path + (r,)))
+        data = [(v, k in ans) for k, v in pathsets.items()]
+        return data
 
+
+    
+    def get_dataset(self, e1: str, r: str, nn_func: Callable, num_nn: Optional[int] = 5):
+        nearest_entities = nn_func(e1, r, k=num_nn)
+        if nearest_entities is None:
+            return []
+        return list(itertools.chain(*[self.get_data_single(e,
+                                            self.train_map[e,r])
+                                 for e in nearest_entities]))
+
+    def get_path_weights(self, dataset):
+        if len(dataset) ==0:
+            return dict()
+        all_paths = sorted(set.union(*[st for st, label in dataset]))
+        path2id = {p:i for i, p in enumerate(all_paths)}
+        rows, cols, data, labels = [], [], [], []
+        for i, (st, label) in enumerate(dataset):
+            for p in st:
+                rows.append(i) 
+                cols.append(path2id[p])
+                data.append(1)
+            labels.append(label)
+        mat = csr_matrix((data,(rows, cols)), shape = (len(dataset),
+                                                        len(path2id)))
+        labels = np.array(labels)
+        lr = LogisticRegression()
+        lr.fit(mat, labels)
+        coefs = lr.coef_.squeeze(0)
+        return {p: coefs[i] for i, p in enumerate(all_paths)}
+        
+
+    def rank_entities(self, e, path_weights, max_len=3):
+        entity_scores = defaultdict(int)
+        # print(self.entity_vocab.keys())
+        if e not in self.entity_vocab:
+            return []
+        e = self.entity_vocab[e]
+        q = deque()
+        q.append((e, ()))
+        while len(q):
+            nd, path = q.popleft()
+            if path in path_weights:
+                entity_scores[nd] += path_weights[path]
+            if len(path) == max_len:
+                continue
+            for r, nxt in self.index_adj_list[nd]:
+                q.append((nxt, path + (r,)))
+        return sorted(entity_scores.items(), key = lambda x: -x[1])
+
+    def predict(self, e, r, nn_func, num_nn=5):
+        dataset = self.get_dataset(e, r, nn_func, num_nn) 
+        path_weights = self.get_path_weights(dataset)
+        return [(self.rev_entity_vocab[e], score) for e, score in \
+                self.rank_entities(e, path_weights)]
 
     def get_programs_from_nearest_neighbors(self, e1: str, r: str, nn_func: Callable, num_nn: Optional[int] = 5):
         all_programs = []
@@ -300,34 +375,37 @@ class CBR(object):
                 self.train_map[e2, r_inv] = temp_list
 
             total_examples += len(e2_list)
-            all_programs = self.get_programs_from_nearest_neighbors(e1, r, self.get_nearest_neighbor_inner_product,
-                                                                    num_nn=self.args.k_adj)
+            answers = self.predict(e1, r,
+                                   self.get_nearest_neighbor_inner_product,
+                                   num_nn = self.args.k_adj)
+            # all_programs = self.get_programs_from_nearest_neighbors(e1, r, self.get_nearest_neighbor_inner_product,
+            #                                                         num_nn=self.args.k_adj)
 
-            if all_programs is None or len(all_programs) == 0:
-                all_acc.append(0.0)
-                continue
+            # if all_programs is None or len(all_programs) == 0:
+            #     all_acc.append(0.0)
+            #     continue
 
-            # filter the program if it is equal to the query relation
-            temp = []
-            for p in all_programs:
-                if len(p) == 1 and p[0] == r:
-                    continue
-                temp.append(p)
-            all_programs = temp
+            # # filter the program if it is equal to the query relation
+            # temp = []
+            # for p in all_programs:
+            #     if len(p) == 1 and p[0] == r:
+            #         continue
+            #     temp.append(p)
+            # all_programs = temp
 
-            if len(all_programs) > 0:
-                non_zero_ctr += len(e2_list)
+            # if len(all_programs) > 0:
+            #     non_zero_ctr += len(e2_list)
 
-            all_uniq_programs = self.rank_programs(all_programs)
+            # all_uniq_programs = self.rank_programs(all_programs)
 
-            for u_p in all_uniq_programs:
-                learnt_programs[r][u_p] += 1
+            # for u_p in all_uniq_programs:
+            #     learnt_programs[r][u_p] += 1
 
-            num_programs.append(len(all_uniq_programs))
-            # Now execute the program
-            answers, not_executed_programs = self.execute_programs(e1, all_uniq_programs)
+            # num_programs.append(len(all_uniq_programs))
+            # # Now execute the program
+            # answers, not_executed_programs = self.execute_programs(e1, all_uniq_programs)
 
-            answers = self.rank_answers(answers)
+            # answers = self.rank_answers(answers)
             if len(answers) > 0:
                 acc = self.get_accuracy(e2_list, [k[0] for k in answers])
                 _10, _5, _3, _1, rr = self.get_hits([k[0] for k in answers], e2_list, query=(e1, r))
@@ -370,7 +448,6 @@ class CBR(object):
 
         logger.info(
             "Out of {} queries, atleast one program was returned for {} queries".format(total_examples, non_zero_ctr))
-        logger.info("Avg number of programs {:3.2f}".format(np.mean(num_programs)))
         logger.info("Avg number of answers after executing the programs: {}".format(np.mean(num_answers)))
         logger.info("Accuracy (Loose): {}".format(np.mean(all_acc)))
         logger.info("Hits@1 {}".format(hits_1 / total_examples))
@@ -378,11 +455,6 @@ class CBR(object):
         logger.info("Hits@5 {}".format(hits_5 / total_examples))
         logger.info("Hits@10 {}".format(hits_10 / total_examples))
         logger.info("MRR {}".format(mrr / total_examples))
-        logger.info("Avg number of nn, that do not have the query relation: {}".format(
-            np.mean(self.all_zero_ctr)))
-        logger.info("Avg num of returned nearest neighbors: {:2.4f}".format(np.mean(self.all_num_ret_nn)))
-        logger.info("Avg number of programs that do not execute per query: {:2.4f}".format(
-            np.mean(self.num_non_executable_programs)))
         if self.args.print_paths:
             for k, v in learnt_programs.items():
                 logger.info("query: {}".format(k))
@@ -454,6 +526,8 @@ def main(args):
                     os.remove(os.path.join(dirname, fil))
                  
         keys = sorted(list(eval_map.keys()))
+        random.seed(0)
+        random.shuffle(keys)
         splitsize = int(np.ceil(len(keys)/args.num_splits))
         start = splitsize * args.splitid
         end = start + splitsize
