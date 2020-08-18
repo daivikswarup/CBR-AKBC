@@ -2,8 +2,8 @@ import argparse
 import numpy as np
 from sklearn.preprocessing import normalize
 import os
-from tqdm import tqdm
-from collections import defaultdict
+from tqdm import tqdm, trange
+from collections import defaultdict, deque
 import pickle
 import torch
 from code.data.data_utils import create_vocab,create_adj_list, load_data, get_unique_entities, \
@@ -16,6 +16,8 @@ import sys
 import wandb
 import networkx as nx
 import itertools
+import torch.nn as nn
+from .models.path_encoder import PathScorer
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -43,6 +45,9 @@ class CBR(object):
         self.index_adj_list, self.g, self.etypes = CBR.get_indexed_adj_list(adj_list,
                                                                      entity_vocab,
                                                                      rel_vocab)
+        self.path_scorer = PathScorer(len(self.entity_vocab),
+                                      len(self.rel_vocab), 128)
+
     @staticmethod
     def get_indexed_adj_list(adj_list, entity_vocab, rel_vocab):
         # Do not need multidigraph or digraph since we only
@@ -79,7 +84,7 @@ class CBR(object):
     def get_nearest_neighbor_inner_product(self, e1: str, r: str, k: Optional[int] = 5) -> List[str]:
         try:
             nearest_entities = [self.rev_entity_vocab[e] for e in
-                                self.nearest_neighbor_1_hop[self.eval_vocab[e1]].tolist()]
+                                self.nearest_neighbor_1_hop[self.entity_vocab[e1]].tolist()]
             # remove e1 from the set of k-nearest neighbors if it is there.
             nearest_entities = [nn for nn in nearest_entities if nn != e1]
             # making sure, that the similar entities also have the query relation
@@ -147,10 +152,10 @@ class CBR(object):
         self.all_num_ret_nn.append(len(nearest_entities))
         zero_ctr = 0
         for e in nearest_entities:
-            if len(self.train_map[(e, r)]) > 0:
+            if len(self.train_map.get((e, r), [])) > 0:
                 nn_answers = self.train_map[(e, r)]
                 all_programs.extend(self.get_programs(e, nn_answers))
-            elif len(self.train_map[(e, r)]) == 0:
+            else:
                 zero_ctr += 1
         self.all_zero_ctr.append(zero_ctr)
         return all_programs
@@ -269,6 +274,88 @@ class CBR(object):
                 all_acc.append(0.0)
         return all_acc
 
+    def execute_program_ents(self, ent,  program, max_branch=20):
+        q = deque()
+        solutions = defaultdict(list)
+        q.append((ent, 0, []))
+        while len(q):
+            e1, depth, path = q.popleft()
+            if depth == len(program):
+                solutions[e1].append(path + [(self.entity_vocab[e1],
+                                              len(self.rel_vocab))])
+                continue
+            rel = program[depth]
+            next_entities = self.train_map[e1, rel]
+            if len(next_entities) > max_branch:
+                next_entities = np.random.choice(next_entities, max_branch,
+                                                 replace=False)
+            depth += 1
+            for e2 in next_entities:
+                q.append((e2, depth, path + [(self.entity_vocab[e1],
+                                              self.rel_vocab[rel])]))
+        return solutions
+
+    def get_entity_programs(self, e1, programs):
+        programs_to_entity = defaultdict(list)
+        for p in programs:
+            for ent, programs in self.execute_program_ents(e1, p).items():
+                programs_to_entity[ent].extend(programs)
+        return programs_to_entity
+
+    def get_training_data(self, e1, programs, e2_list):
+        e2_set = set(e2_list)
+        programs_to_entity = self.get_entity_programs(e1, programs)
+        keys = list(programs_to_entity.keys())
+        programs = [programs_to_entity[k] for k in keys]
+        labels = [k in e2_set for k in keys]
+        return programs, labels
+
+    def train_pathscorer(self, lr = 1e-4, n_epochs = 1):
+        loss = nn.BCELoss()
+        optimizer = torch.optim.Adam(self.path_scorer.parameters(),
+                                     lr = lr)
+        for epoch in trange(n_epochs, desc="epochs"):
+            for i, ((e1, r), e2_list) in enumerate(tqdm((list(self.train_map.items())),
+                                                  desc="Training")):
+                # if i > 100: # debug 100 batches
+                #     break
+                if len(e2_list) == 0:
+                    continue
+
+                all_programs = self.get_programs_from_nearest_neighbors(e1, r, self.get_nearest_neighbor_inner_product,
+                                                                        num_nn=self.args.k_adj)
+
+                # filter the program if it is equal to the query relation
+                temp = []
+                for p in all_programs:
+                    if len(p) == 1 and p[0] == r:
+                        continue
+                    temp.append(p)
+                all_programs = temp
+                all_uniq_programs = \
+                    self.rank_programs(all_programs)[:self.args.max_num_programs]
+                programs, labels = self.get_training_data(e1,
+                                                          all_uniq_programs,
+                                                          e2_list)
+                if len(programs) == 0:
+                    continue
+                scores = torch.stack([self.path_scorer(p, self.rel_vocab[r]) for p
+                                      in programs])
+                labels = torch.tensor(labels).float()
+                l = loss(scores, labels)
+                optimizer.zero_grad()
+                l.backward()
+                optimizer.step()
+
+                print("Batch {}\t Loss = {}".format(i, l.detach().cpu().numpy()))
+            model_path = os.path.join(self.args.output_dir, 'pathscorer',
+                                      'model.pt')
+            torch.save(self.path_scorer.state_dict(), model_path)
+            metrics = self.do_symbolic_case_based_reasoning()
+            logger.info('Metrics after epoch {} = {}'.format(epoch,metrics)) 
+
+
+
     def do_symbolic_case_based_reasoning(self):
         num_programs = []
         num_answers = []
@@ -279,6 +366,9 @@ class CBR(object):
         per_relation_query_count = {}
         total_examples = 0
         learnt_programs = defaultdict(lambda: defaultdict(int))  # for each query relation, a map of programs to count
+        model_path = os.path.join(self.args.output_dir, 'pathscorer',
+                                  'model.pt')
+        self.path_scorer.load_state_dict(torch.load(model_path))
         for _, ((e1, r), e2_list) in enumerate(tqdm((self.eval_map.items()))):
             # if e2_list is in train list then remove them
             # Normally, this shouldnt happen at all, but this happens for Nell-995.
@@ -321,16 +411,28 @@ class CBR(object):
             if len(all_programs) > 0:
                 non_zero_ctr += len(e2_list)
 
-            all_uniq_programs = self.rank_programs(all_programs)
+            all_uniq_programs = \
+                self.rank_programs(all_programs)[:self.args.max_num_programs]
 
             for u_p in all_uniq_programs:
                 learnt_programs[r][u_p] += 1
 
             num_programs.append(len(all_uniq_programs))
-            # Now execute the program
-            answers, not_executed_programs = self.execute_programs(e1, all_uniq_programs)
+            # # Now execute the program
+            # answers, not_executed_programs = self.execute_programs(e1, all_uniq_programs)
 
-            answers = self.rank_answers(answers)
+            # answers = self.rank_answers(answers)
+
+            entity_paths = self.get_entity_programs(e1, all_uniq_programs)
+            answers = []
+            rel_id = self.rel_vocab[r]
+            for e, programs in entity_paths.items():
+                answers.append((e, self.path_scorer(programs,
+                                                    rel_id).detach().cpu().numpy()))
+            answers.sort(key = lambda x:-x[1])
+
+
+
             if len(answers) > 0:
                 acc = self.get_accuracy(e2_list, [k[0] for k in answers])
                 _10, _5, _3, _1, rr = self.get_hits([k[0] for k in answers], e2_list, query=(e1, r))
@@ -417,6 +519,13 @@ class CBR(object):
                        'avg_num_prog': np.mean(num_programs), 'avg_num_ans': np.mean(num_answers),
                        'avg_num_failed_prog': np.mean(self.num_non_executable_programs), 'acc_loose': np.mean(all_acc)})
 
+        return {'hits_1': hits_1 / total_examples, 'hits_3': hits_3 / total_examples,
+                       'hits_5': hits_5 / total_examples, 'hits_10': hits_10 / total_examples,
+                       'mrr': mrr / total_examples, 'total_examples': total_examples, 'non_zero_ctr': non_zero_ctr,
+                       'all_zero_ctr': self.all_zero_ctr, 'avg_num_nn': np.mean(self.all_num_ret_nn),
+                       'avg_num_prog': np.mean(num_programs), 'avg_num_ans': np.mean(num_answers),
+                       'avg_num_failed_prog': np.mean(self.num_non_executable_programs), 'acc_loose': np.mean(all_acc)}
+
 
 def main(args):
     dataset_name = args.dataset_name
@@ -499,13 +608,14 @@ def main(args):
 
     # Calculate similarity
     logger.info('calculating similarity')
-    sim = symbolically_smart_agent.calc_sim(adj_mat,
-                                            query_ind)  # n X N (n== size of dev_entities, N: size of all entities)
+    sim = symbolically_smart_agent.calc_sim(adj_mat, 
+                                          np.arange(len(entity_vocab)))  # n X N (n== size of dev_entities, N: size of all entities)
     nearest_neighbor_1_hop = np.argsort(-sim.toarray(), axis=-1)
     symbolically_smart_agent.set_nearest_neighbor_1_hop(nearest_neighbor_1_hop)
 
     logger.info("Loaded...")
 
+    symbolically_smart_agent.train_pathscorer()
     symbolically_smart_agent.do_symbolic_case_based_reasoning()
 
 
