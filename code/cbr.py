@@ -347,7 +347,8 @@ class CBR(object):
                 l.backward()
                 optimizer.step()
 
-                print("Batch {}\t Loss = {}".format(i, l.detach().cpu().numpy()))
+                if i %100 == 0:
+                    print("Batch {}\t Loss = {}".format(i, l.detach().cpu().numpy()))
             model_path = os.path.join(self.args.output_dir, 'pathscorer',
                                       'model.pt')
             torch.save(self.path_scorer.state_dict(), model_path)
@@ -614,9 +615,11 @@ def main(args):
     symbolically_smart_agent.set_nearest_neighbor_1_hop(nearest_neighbor_1_hop)
 
     logger.info("Loaded...")
-
-    symbolically_smart_agent.train_pathscorer()
-    symbolically_smart_agent.do_symbolic_case_based_reasoning()
+    
+    if args.train:
+        symbolically_smart_agent.train_pathscorer()
+    else:
+        symbolically_smart_agent.do_symbolic_case_based_reasoning()
 
 
 if __name__ == '__main__':
@@ -629,6 +632,7 @@ if __name__ == '__main__':
     parser.add_argument("--test_file_name", type=str, default='')
     parser.add_argument("--max_num_programs", type=int, default=15, help="Max number of paths to consider")
     parser.add_argument("--splitid", type=int, default=0, help="Split number")
+    parser.add_argument("--train", type=int, default=0, help="Train or test")
     parser.add_argument("--num_splits", type=int, default=20, help="Total "
                                                     "number of workers")
     parser.add_argument("--print_paths", action="store_true")
