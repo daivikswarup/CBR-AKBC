@@ -9,7 +9,7 @@ class PathEncoder(nn.Module):
 
     """Docstring for PathEncoder. """
 
-    def __init__(self, ndim, device = "cpu"):
+    def __init__(self, ndim, device = "cuda"):
         """TODO: to be defined.
 
         :num_entities: TODO
@@ -23,7 +23,7 @@ class PathEncoder(nn.Module):
         self.map_rel = nn.Linear(self.ndim, self.ndim, bias = False)
         self.map_ent = nn.Linear(self.ndim, self.ndim, bias = False)
         self.map_hidden = nn.Linear(self.ndim, self.ndim, bias = True)
-        self.device = torch.device(device)
+        self.device = device
 
     def forward(self, paths):
         """TODO: Docstring for forward.
@@ -35,7 +35,7 @@ class PathEncoder(nn.Module):
 
         """
         bsize = paths[0][0].shape[0]
-        rembedding = torch.zeros((bsize, self.ndim))
+        rembedding = torch.zeros((bsize, self.ndim)).to(self.device)
         for e, r in paths:
             rembedding = F.relu(self.map_rel(r) + self.map_ent(e) +
                                 self.map_hidden(rembedding))
@@ -48,7 +48,7 @@ class PathScorer(nn.Module):
 
     """Docstring for PathScorer. """
 
-    def __init__(self, num_entities, num_rels, dim, device="cpu" ):
+    def __init__(self, num_entities, num_rels, dim, device="cuda" ):
         """TODO: to be defined.
 
         :num_entities: TODO
@@ -60,7 +60,7 @@ class PathScorer(nn.Module):
         self.num_entities = num_entities
         self.num_rels = num_rels
         self.dim = dim
-        self.device = torch.device(device)
+        self.device = device
         self.path_encoder = PathEncoder(dim, device)
         self.dummy_entity = num_entities
         self.entity_embeddings = nn.Embedding(num_entities+1, dim)
@@ -74,15 +74,14 @@ class PathScorer(nn.Module):
         embeddings = []
         for timestep in zip(*padded):
             entities, relations = zip(*timestep)
-            entities = torch.LongTensor(entities, device = self.device)
-            relations = torch.LongTensor(relations, device = self.device)
+            entities = torch.LongTensor(entities).to(self.device)
+            relations = torch.LongTensor(relations).to(self.device)
             embeddings.append((self.entity_embeddings(entities),
                                self.rel_embeddings(relations)))
         return embeddings
 
     def forward(self, paths, relation):
-        target_relation = self.rel_embeddings(torch.LongTensor([relation],
-                                                               device=self.device))
+        target_relation = self.rel_embeddings(torch.LongTensor([relation]).to(self.device))
         # 1 x dim
         packed_padded_paths = self.pad_pack(paths)
         path_embeddings = self.path_encoder(packed_padded_paths)

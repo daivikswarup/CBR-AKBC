@@ -9,6 +9,7 @@ import torch
 from code.data.data_utils import create_vocab,create_adj_list, load_data, get_unique_entities, \
     read_graph, get_entities_group_by_relation, get_inv_relation, \
     load_data_all_triples, read_graph_sparse
+from scipy.sparse import vstack
 from typing import *
 import logging
 import json
@@ -47,6 +48,7 @@ class CBR(object):
                                                                      rel_vocab)
         self.path_scorer = PathScorer(len(self.entity_vocab),
                                       len(self.rel_vocab), 128)
+        self.path_scorer.cuda()
 
     @staticmethod
     def get_indexed_adj_list(adj_list, entity_vocab, rel_vocab):
@@ -70,16 +72,22 @@ class CBR(object):
         self.nearest_neighbor_1_hop = nearest_neighbor_1_hop
 
     @staticmethod
-    def calc_sim(adj_mat: Type[torch.Tensor], query_entities: Type[torch.LongTensor]) -> Type[torch.LongTensor]:
+    def calc_sim(adj_mat: Type[torch.Tensor], query_entities:
+                 Type[torch.LongTensor], max_sim = 100) -> Type[torch.LongTensor]:
         """
         :param adj_mat: N X R
         :param query_entities: b is a batch of indices of query entities
         :return:
         """
-        query_mat = adj_mat[query_entities, :]
-        sim = query_mat.dot(adj_mat.transpose())
-        # sim = torch.matmul(query_entities_vec, torch.t(adj_mat))
-        return sim
+        bsize = 10
+        all_nns = []
+        for i in trange(0, len(query_entities), bsize):
+            query_mat = adj_mat[query_entities[i:i+bsize], :]
+            sim = query_mat.dot(adj_mat.transpose())
+            nn = np.argsort(-sim.toarray(), axis=-1)[:,:max_sim]
+            del sim
+            all_nns.append(nn)
+        return vstack(all_nns)
 
     def get_nearest_neighbor_inner_product(self, e1: str, r: str, k: Optional[int] = 5) -> List[str]:
         try:
@@ -310,7 +318,7 @@ class CBR(object):
         labels = [k in e2_set for k in keys]
         return programs, labels
 
-    def train_pathscorer(self, lr = 1e-4, n_epochs = 1):
+    def train_pathscorer(self, lr = 1e-4, n_epochs = 20):
         loss = nn.BCELoss()
         optimizer = torch.optim.Adam(self.path_scorer.parameters(),
                                      lr = lr)
@@ -341,7 +349,7 @@ class CBR(object):
                     continue
                 scores = torch.stack([self.path_scorer(p, self.rel_vocab[r]) for p
                                       in programs])
-                labels = torch.tensor(labels).float()
+                labels = torch.tensor(labels).float().cuda()
                 l = loss(scores, labels)
                 optimizer.zero_grad()
                 l.backward()
@@ -349,8 +357,10 @@ class CBR(object):
 
                 if i %100 == 0:
                     print("Batch {}\t Loss = {}".format(i, l.detach().cpu().numpy()))
-            model_path = os.path.join(self.args.output_dir, 'pathscorer',
+            model_path = \
+                 os.path.join(self.args.output_dir,self.args.dataset_name,'pathscorer',
                                       'model.pt')
+            os.makedirs(os.path.dirname(model_path), exist_ok=True)
             torch.save(self.path_scorer.state_dict(), model_path)
             metrics = self.do_symbolic_case_based_reasoning()
             logger.info('Metrics after epoch {} = {}'.format(epoch,metrics)) 
@@ -367,7 +377,7 @@ class CBR(object):
         per_relation_query_count = {}
         total_examples = 0
         learnt_programs = defaultdict(lambda: defaultdict(int))  # for each query relation, a map of programs to count
-        model_path = os.path.join(self.args.output_dir, 'pathscorer',
+        model_path = os.path.join(self.args.output_dir, self.args.dataset_name, 'pathscorer',
                                   'model.pt')
         self.path_scorer.load_state_dict(torch.load(model_path))
         for _, ((e1, r), e2_list) in enumerate(tqdm((self.eval_map.items()))):
@@ -609,9 +619,9 @@ def main(args):
 
     # Calculate similarity
     logger.info('calculating similarity')
-    sim = symbolically_smart_agent.calc_sim(adj_mat, 
+    nearest_neighbor_1_hop = symbolically_smart_agent.calc_sim(adj_mat, 
                                           np.arange(len(entity_vocab)))  # n X N (n== size of dev_entities, N: size of all entities)
-    nearest_neighbor_1_hop = np.argsort(-sim.toarray(), axis=-1)
+   # nearest_neighbor_1_hop = np.argsort(-sim.toarray(), axis=-1)
     symbolically_smart_agent.set_nearest_neighbor_1_hop(nearest_neighbor_1_hop)
 
     logger.info("Loaded...")

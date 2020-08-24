@@ -108,7 +108,7 @@ def read_graph_sparse(filename, entity_vocab, rel_vocab, ngram_size, use_entity)
     index_adj_list = {entity_vocab[e1]: [(rel_vocab[r], entity_vocab[e2]) for
                                          r, e2 in lis] for e1, lis in
                       adj_list.items()}
-    return get_features(index_adj_list, ngram_size, use_entity) 
+    return get_features(index_adj_list, len(entity_vocab), ngram_size, use_entity) 
 
 def set_vectorizer(dic_set, num_entities):
     """Convert list of sets to sparse matrix
@@ -129,10 +129,17 @@ def set_vectorizer(dic_set, num_entities):
             rows.append(key)
             cols.append(feat2id[feat])
             data.append(1)
+    print(len(data))
+    print(len(rows))
+    print(len(cols))
+    print(max(rows))
+    print(max(cols))
+    print(num_entities)
+    print(num_features)
     return csr_matrix((data, (rows, cols)), shape=(num_entities, num_features))
 
 
-def get_entity_sparse(adj_list):
+def get_entity_sparse(adj_list, num_entities):
     entity_rows = []
     entity_cols = []
     for e1, lis in tqdm(adj_list.items()):
@@ -141,11 +148,11 @@ def get_entity_sparse(adj_list):
             entity_cols.append(e2)
     entity_data = [1] * len(entity_rows) 
     entity_adj = csr_matrix((entity_data,(entity_rows, entity_cols)),
-                            shape=(len(adj_list), len(adj_list)))
+                            shape=(num_entities, num_entities))
     return entity_adj
 
 
-def get_path_features(adj_list, ngram_size=1):
+def get_path_features(adj_list, num_entities, ngram_size=1):
     paths = [defaultdict(lambda: {()})]
     for i in range(ngram_size):
         nexthop = defaultdict(set)
@@ -153,18 +160,18 @@ def get_path_features(adj_list, ngram_size=1):
             for r, e2 in lis:
                 nexthop[e1] |= {(r,)+x for x in paths[-1][e2]}
         paths.append(nexthop)
-    path_matrices = [set_vectorizer(p, len(adj_list)) for p in paths[1:]]   
+    path_matrices = [set_vectorizer(p, num_entities) for p in paths[1:]]   
     return path_matrices
 
-def get_multihop_entity_features(adj_list, ngram_size=1):
-    entity_adj = get_entity_sparse(adj_list)
+def get_multihop_entity_features(adj_list, num_entities, ngram_size=1):
+    entity_adj = get_entity_sparse(adj_list, num_entities)
     all_features = [entity_adj]
     for i in range(ngram_size-1):
         next_hop = entity_adj.dot(all_features[-1])
         all_features.append(next_hop)
     return all_features
 
-def get_features(adj_list, ngram_size=1, use_entity=False):
+def get_features(adj_list,num_entities, ngram_size=1, use_entity=False):
     """TODO: Docstring for read_graph_sparse.
 
     :file_name: TODO
@@ -173,9 +180,9 @@ def get_features(adj_list, ngram_size=1, use_entity=False):
     :returns: TODO
 
     """
-    all_features = get_path_features(adj_list, ngram_size)
+    all_features = get_path_features(adj_list, num_entities,  ngram_size)
     if use_entity:
-        all_features += get_multihop_entity_features(adj_list, ngram_size)
+        all_features += get_multihop_entity_features(adj_list, num_entities, ngram_size)
     return hstack(all_features)
 
 
