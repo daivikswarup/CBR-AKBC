@@ -318,6 +318,7 @@ class CBR(object):
         labels = [k in e2_set for k in keys]
         return programs, labels
 
+
     def train_pathscorer(self, lr = 1e-4, n_epochs = 20):
         loss = nn.BCELoss()
         optimizer = torch.optim.Adam(self.path_scorer.parameters(),
@@ -347,8 +348,7 @@ class CBR(object):
                                                           e2_list)
                 if len(programs) == 0:
                     continue
-                scores = torch.stack([self.path_scorer(p, self.rel_vocab[r]) for p
-                                      in programs])
+                scores = self.path_scorer(programs, self.rel_vocab[r])
                 labels = torch.tensor(labels).float().cuda()
                 l = loss(scores, labels)
                 optimizer.zero_grad()
@@ -653,6 +653,8 @@ if __name__ == '__main__':
     parser.add_argument("--use_entities", type=int, default=0,
                         help="Use neighboring entities for similarity")
     parser.add_argument("--n_paths", type=int, default=1000,
+                        help="Number of paths")
+    parser.add_argument("--bsize", type=int, default=64,
                         help="Number of paths")
     parser.add_argument("--use_wandb", type=int, choices=[0, 1], default=0, help="Set to 1 if using W&B")
     parser.add_argument("--output_per_relation_scores", action="store_true")

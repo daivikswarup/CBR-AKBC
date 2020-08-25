@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from itertools import chain
 
 
 
@@ -83,14 +84,20 @@ class PathScorer(nn.Module):
         return torch.stack(embeddings, dim = 0)
 
     def forward(self, paths, relation):
+        num_paths = [len(p) for p in paths]
+        all_paths = list(chain(*paths)) # concatenate all paths
         target_relation = self.rel_embeddings(torch.LongTensor([relation]).to(self.device))
         # 1 x dim
-        packed_padded_paths = self.pad_pack(paths)
+        packed_padded_paths = self.pad_pack(all_paths)
         path_embeddings = self.path_encoder(packed_padded_paths)
         # num_paths x dim
         scores = torch.sum(target_relation * path_embeddings, dim = 1)
         # num_paths,
-        total_score = torch.logsumexp(scores, dim = 0)
+        # paths to each endpoint
+        split_paths = torch.split(scores, num_paths)
+        total_score = torch.stack([torch.logsumexp(path_score, dim = 0) for
+                                   path_score in split_paths])
+
         return torch.sigmoid(total_score)
  
 
