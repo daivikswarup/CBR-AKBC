@@ -14,7 +14,7 @@ from typing import *
 import logging
 import json
 import sys
-import wandb
+# import wandb
 import networkx as nx
 import itertools
 import torch.nn as nn
@@ -526,14 +526,14 @@ class CBR(object):
             wandb.log({'hits_1': hits_1 / total_examples, 'hits_3': hits_3 / total_examples,
                        'hits_5': hits_5 / total_examples, 'hits_10': hits_10 / total_examples,
                        'mrr': mrr / total_examples, 'total_examples': total_examples, 'non_zero_ctr': non_zero_ctr,
-                       'all_zero_ctr': self.all_zero_ctr, 'avg_num_nn': np.mean(self.all_num_ret_nn),
+                       'all_zero_ctr': sum(self.all_zero_ctr), 'avg_num_nn': np.mean(self.all_num_ret_nn),
                        'avg_num_prog': np.mean(num_programs), 'avg_num_ans': np.mean(num_answers),
                        'avg_num_failed_prog': np.mean(self.num_non_executable_programs), 'acc_loose': np.mean(all_acc)})
 
         return {'hits_1': hits_1 / total_examples, 'hits_3': hits_3 / total_examples,
                        'hits_5': hits_5 / total_examples, 'hits_10': hits_10 / total_examples,
                        'mrr': mrr / total_examples, 'total_examples': total_examples, 'non_zero_ctr': non_zero_ctr,
-                       'all_zero_ctr': self.all_zero_ctr, 'avg_num_nn': np.mean(self.all_num_ret_nn),
+                       'all_zero_ctr': sum(self.all_zero_ctr), 'avg_num_nn': np.mean(self.all_num_ret_nn),
                        'avg_num_prog': np.mean(num_programs), 'avg_num_ans': np.mean(num_answers),
                        'avg_num_failed_prog': np.mean(self.num_non_executable_programs), 'acc_loose': np.mean(all_acc)}
 
