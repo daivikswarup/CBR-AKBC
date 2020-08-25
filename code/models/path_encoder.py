@@ -9,7 +9,7 @@ class PathEncoder(nn.Module):
 
     """Docstring for PathEncoder. """
 
-    def __init__(self, ndim, device = "cuda"):
+    def __init__(self, ndim, num_layers = 2, device = "cuda"):
         """TODO: to be defined.
 
         :num_entities: TODO
@@ -20,9 +20,11 @@ class PathEncoder(nn.Module):
         nn.Module.__init__(self)
 
         self.ndim = ndim
-        self.map_rel = nn.Linear(self.ndim, self.ndim, bias = False)
-        self.map_ent = nn.Linear(self.ndim, self.ndim, bias = False)
-        self.map_hidden = nn.Linear(self.ndim, self.ndim, bias = True)
+        self.rnn = nn.LSTM(input_size = 2*self.ndim, hidden_size=self.ndim,
+                           num_layers = num_layers)
+        # self.map_rel = nn.Linear(self.ndim, self.ndim, bias = False)
+        # self.map_ent = nn.Linear(self.ndim, self.ndim, bias = False)
+        # self.map_hidden = nn.Linear(self.ndim, self.ndim, bias = True)
         self.device = device
 
     def forward(self, paths):
@@ -34,12 +36,10 @@ class PathEncoder(nn.Module):
         :returns: TODO
 
         """
-        bsize = paths[0][0].shape[0]
-        rembedding = torch.zeros((bsize, self.ndim)).to(self.device)
-        for e, r in paths:
-            rembedding = F.relu(self.map_rel(r) + self.map_ent(e) +
-                                self.map_hidden(rembedding))
-        return rembedding
+        bsize = paths.shape[1]
+        seqlen = paths.shape[0]
+        output, (h, c) = self.rnn(paths)
+        return h[-1,:,:]
 
 
 
@@ -48,7 +48,7 @@ class PathScorer(nn.Module):
 
     """Docstring for PathScorer. """
 
-    def __init__(self, num_entities, num_rels, dim, device="cuda" ):
+    def __init__(self, num_entities, num_rels, dim,num_layers=2, device="cuda" ):
         """TODO: to be defined.
 
         :num_entities: TODO
@@ -61,7 +61,7 @@ class PathScorer(nn.Module):
         self.num_rels = num_rels
         self.dim = dim
         self.device = device
-        self.path_encoder = PathEncoder(dim, device)
+        self.path_encoder = PathEncoder(dim, num_layers, device)
         self.dummy_entity = num_entities
         self.entity_embeddings = nn.Embedding(num_entities+1, dim)
         self.dummy_rel = num_rels
@@ -76,9 +76,11 @@ class PathScorer(nn.Module):
             entities, relations = zip(*timestep)
             entities = torch.LongTensor(entities).to(self.device)
             relations = torch.LongTensor(relations).to(self.device)
-            embeddings.append((self.entity_embeddings(entities),
-                               self.rel_embeddings(relations)))
-        return embeddings
+            embeddings.append(torch.cat([self.entity_embeddings(entities),
+                               self.rel_embeddings(relations)], dim=1))
+        # returns PathLen x NumPath x (2Dim) : concatenation of relation and
+                              # entity
+        return torch.stack(embeddings, dim = 0)
 
     def forward(self, paths, relation):
         target_relation = self.rel_embeddings(torch.LongTensor([relation]).to(self.device))

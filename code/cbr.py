@@ -87,7 +87,7 @@ class CBR(object):
             nn = np.argsort(-sim.toarray(), axis=-1)[:,:max_sim]
             del sim
             all_nns.append(nn)
-        return vstack(all_nns)
+        return np.vstack(all_nns)
 
     def get_nearest_neighbor_inner_product(self, e1: str, r: str, k: Optional[int] = 5) -> List[str]:
         try:
