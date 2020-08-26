@@ -1,4 +1,5 @@
 import argparse
+import gc
 import numpy as np
 from sklearn.preprocessing import normalize
 import os
@@ -86,6 +87,9 @@ class CBR(object):
             sim = query_mat.dot(adj_mat.transpose())
             nn = np.argsort(-sim.toarray(), axis=-1)[:,:max_sim]
             del sim
+            del query_mat
+            if i%10:
+                gc.collect()
             all_nns.append(nn)
         return np.vstack(all_nns)
 
@@ -323,6 +327,7 @@ class CBR(object):
         loss = nn.BCELoss()
         optimizer = torch.optim.Adam(self.path_scorer.parameters(),
                                      lr = lr)
+        metrics = self.do_symbolic_case_based_reasoning()
         for epoch in trange(n_epochs, desc="epochs"):
             for i, ((e1, r), e2_list) in enumerate(tqdm((list(self.train_map.items())),
                                                   desc="Training")):
@@ -436,11 +441,15 @@ class CBR(object):
 
             entity_paths = self.get_entity_programs(e1, all_uniq_programs)
             answers = []
-            rel_id = self.rel_vocab[r]
-            for e, programs in entity_paths.items():
-                answers.append((e, self.path_scorer(programs,
-                                                    rel_id).detach().cpu().numpy()))
-            answers.sort(key = lambda x:-x[1])
+            if len(entity_paths) > 0:
+                rel_id = self.rel_vocab[r]
+                entities = [e for e, p in entity_paths.items()]
+                paths = [p for e, p in entity_paths.items()]
+                path_scores = self.path_scorer(paths,
+                                               rel_id).detach().cpu().numpy()
+                for e, score in zip(entities, path_scores):
+                    answers.append((e, score))
+                answers.sort(key = lambda x:-x[1])
 
 
 
