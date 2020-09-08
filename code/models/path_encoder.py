@@ -23,9 +23,6 @@ class PathEncoder(nn.Module):
         self.ndim = ndim
         self.rnn = nn.LSTM(input_size = 2*self.ndim, hidden_size=self.ndim,
                            num_layers = num_layers)
-        # self.map_rel = nn.Linear(self.ndim, self.ndim, bias = False)
-        # self.map_ent = nn.Linear(self.ndim, self.ndim, bias = False)
-        # self.map_hidden = nn.Linear(self.ndim, self.ndim, bias = True)
         self.device = device
 
     def forward(self, paths):

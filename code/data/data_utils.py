@@ -111,10 +111,12 @@ def read_graph_sparse(filename, entity_vocab, rel_vocab, ngram_size, use_entity)
     return get_features(index_adj_list, len(entity_vocab), ngram_size, use_entity) 
 
 def set_vectorizer(dic_set, num_entities):
-    """Convert list of sets to sparse matrix
+    """Convert dictionary to sparse matrix
 
-    :list_set: TODO
-    :returns: TODO
+    :dic_set: Dict mapping Entity -> set of features
+    :num_entities: Number of entities
+
+    :returns: CSR matrix of Num_entities x num_features
 
     """
     all_feats = set()
@@ -129,17 +131,11 @@ def set_vectorizer(dic_set, num_entities):
             rows.append(key)
             cols.append(feat2id[feat])
             data.append(1)
-    print(len(data))
-    print(len(rows))
-    print(len(cols))
-    print(max(rows))
-    print(max(cols))
-    print(num_entities)
-    print(num_features)
     return csr_matrix((data, (rows, cols)), shape=(num_entities, num_features))
 
 
 def get_entity_sparse(adj_list, num_entities):
+    """ Returns sparse adjacency matrix of size n_entities x n_entities """
     entity_rows = []
     entity_cols = []
     for e1, lis in tqdm(adj_list.items()):
@@ -153,6 +149,10 @@ def get_entity_sparse(adj_list, num_entities):
 
 
 def get_path_features(adj_list, num_entities, ngram_size=1):
+    """ Returns list of sparse metrices each of size 
+    num_entities x num_features_i where num_features_i is the number of
+    distinct i length paths 
+    """
     paths = [defaultdict(lambda: {()})]
     for i in range(ngram_size):
         nexthop = defaultdict(set)
@@ -164,6 +164,9 @@ def get_path_features(adj_list, num_entities, ngram_size=1):
     return path_matrices
 
 def get_multihop_entity_features(adj_list, num_entities, ngram_size=1):
+    """ Returns list of sparse metrices each of size 
+    num_entities x num_entities, each storing the neighborhood after i hops
+    """
     entity_adj = get_entity_sparse(adj_list, num_entities)
     all_features = [entity_adj]
     for i in range(ngram_size-1):
@@ -172,13 +175,8 @@ def get_multihop_entity_features(adj_list, num_entities, ngram_size=1):
     return all_features
 
 def get_features(adj_list,num_entities, ngram_size=1, use_entity=False):
-    """TODO: Docstring for read_graph_sparse.
-
-    :file_name: TODO
-    :entity_vocab: TODO
-    :rel_vocab: TODO
-    :returns: TODO
-
+    """Returns sparse matrix of size n_entities x n_features including all the
+    ngram path and entity features
     """
     all_features = get_path_features(adj_list, num_entities,  ngram_size)
     if use_entity:

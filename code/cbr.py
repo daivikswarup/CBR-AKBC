@@ -1,8 +1,9 @@
 import argparse
-import gc
+import uuid
 import numpy as np
 from sklearn.preprocessing import normalize
 import os
+from sklearn.neighbors import NearestNeighbors
 from tqdm import tqdm, trange
 from collections import defaultdict, deque
 import pickle
@@ -15,11 +16,11 @@ from typing import *
 import logging
 import json
 import sys
-# import wandb
+import wandb
 import networkx as nx
 import itertools
 import torch.nn as nn
-from .models.path_encoder import PathScorer
+from code.models.path_encoder import PathScorer
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -32,11 +33,13 @@ logger.addHandler(ch)
 
 
 class CBR(object):
-    def __init__(self, args, train_map, eval_map, entity_vocab, rev_entity_vocab, rel_vocab, rev_rel_vocab, eval_vocab,
+    def __init__(self, args, full_map, train_map, eval_map, entity_vocab, rev_entity_vocab, rel_vocab, rev_rel_vocab, eval_vocab,
                  eval_rev_vocab, adj_list, rel_ent_map):
         self.args = args
+        self.run_id = uuid.uuid4().hex
         self.eval_map = eval_map
         self.train_map = train_map
+        self.full_map = full_map
         self.all_zero_ctr = []
         self.all_num_ret_nn = []
         self.entity_vocab, self.rev_entity_vocab, self.rel_vocab, self.rev_rel_vocab = entity_vocab, rev_entity_vocab, rel_vocab, rev_rel_vocab
@@ -72,26 +75,33 @@ class CBR(object):
     def set_nearest_neighbor_1_hop(self, nearest_neighbor_1_hop):
         self.nearest_neighbor_1_hop = nearest_neighbor_1_hop
 
-    @staticmethod
-    def calc_sim(adj_mat: Type[torch.Tensor], query_entities:
+    def calc_sim(self, kg_file: Type[torch.Tensor], query_entities:
                  Type[torch.LongTensor], max_sim = 100) -> Type[torch.LongTensor]:
         """
         :param adj_mat: N X R
         :param query_entities: b is a batch of indices of query entities
         :return:
         """
-        bsize = 10
-        all_nns = []
-        for i in trange(0, len(query_entities), bsize):
-            query_mat = adj_mat[query_entities[i:i+bsize], :]
-            sim = query_mat.dot(adj_mat.transpose())
-            nn = np.argsort(-sim.toarray(), axis=-1)[:,:max_sim]
-            del sim
-            del query_mat
-            if i%10:
-                gc.collect()
-            all_nns.append(nn)
-        return np.vstack(all_nns)
+        fname = os.path.join(self.args.output_dir, self.args.dataset_name,
+                             "sim.pkl")
+        if not os.path.exists(fname):
+            logger.info('reading sparse mat')
+            adj_mat = read_graph_sparse(kg_file, self.entity_vocab,
+                                        self.rel_vocab, self.args.ngrams,
+                                       self.args.use_entities)
+            adj_mat = np.sqrt(adj_mat)
+            logger.info('normalizing sparse mat')
+            adj_mat = normalize(adj_mat)
+            nbrs = NearestNeighbors(n_neighbors=max_sim, n_jobs=-1).fit(adj_mat)
+            dist, ind = nbrs.kneighbors(adj_mat)
+            os.makedirs(os.path.dirname(fname), exist_ok=True)
+            with open(fname, 'wb') as f:
+                pickle.dump(ind, f)
+        else:
+            with open(fname, 'rb') as f:
+                ind = pickle.load(f)
+
+        return ind
 
     def get_nearest_neighbor_inner_product(self, e1: str, r: str, k: Optional[int] = 5) -> List[str]:
         try:
@@ -105,7 +115,7 @@ class CBR(object):
             for nn in nearest_entities:
                 if ctr == k:
                     break
-                if len(self.train_map[nn, r]) > 0:
+                if len(self.full_map[nn, r]) > 0:
                     temp.append(nn)
                     ctr += 1
             nearest_entities = temp
@@ -160,12 +170,12 @@ class CBR(object):
         nearest_entities = nn_func(e1, r, k=num_nn)
         if nearest_entities is None:
             self.all_num_ret_nn.append(0)
-            return None
+            return []
         self.all_num_ret_nn.append(len(nearest_entities))
         zero_ctr = 0
         for e in nearest_entities:
-            if len(self.train_map.get((e, r), [])) > 0:
-                nn_answers = self.train_map[(e, r)]
+            if len(self.full_map.get((e, r), [])) > 0:
+                nn_answers = self.full_map[(e, r)]
                 all_programs.extend(self.get_programs(e, nn_answers))
             else:
                 zero_ctr += 1
@@ -193,7 +203,7 @@ class CBR(object):
             # reached end, return node
             return [e]
         next_rel = path[depth]
-        next_entities = self.train_map[(e, path[depth])]
+        next_entities = self.full_map[(e, path[depth])]
         if len(next_entities) == 0:
             # edge not present
             return []
@@ -205,7 +215,8 @@ class CBR(object):
             answers += self.execute_one_program(e_next, path, depth + 1, max_branch)
         return answers
 
-    def execute_programs(self, e: str, path_list: List[List[str]], max_branch: Optional[int] = 1000) -> List[str]:
+    def execute_programs(self, e: str, path_list: List[List[str]], max_branch:
+                         Optional[int] = 20) -> List[str]:
 
         all_answers = []
         not_executed_paths = []
@@ -297,7 +308,7 @@ class CBR(object):
                                               len(self.rel_vocab))])
                 continue
             rel = program[depth]
-            next_entities = self.train_map[e1, rel]
+            next_entities = self.full_map[e1, rel]
             if len(next_entities) > max_branch:
                 next_entities = np.random.choice(next_entities, max_branch,
                                                  replace=False)
@@ -324,15 +335,20 @@ class CBR(object):
 
 
     def train_pathscorer(self, lr = 1e-4, n_epochs = 20):
+        model_path = \
+                 os.path.join(self.args.output_dir,self.run_id,self.args.dataset_name,'pathscorer')
+        os.makedirs(model_path, exist_ok=True)
+        with   \
+            open(os.path.join(self.args.output_dir,self.run_id,self.args.dataset_name,
+                          'config.pkl'), 'wb') as f:
+            pickle.dump(vars(self.args), f)
         loss = nn.BCELoss()
         optimizer = torch.optim.Adam(self.path_scorer.parameters(),
                                      lr = lr)
-        metrics = self.do_symbolic_case_based_reasoning()
+        best_mrr = 0
         for epoch in trange(n_epochs, desc="epochs"):
             for i, ((e1, r), e2_list) in enumerate(tqdm((list(self.train_map.items())),
                                                   desc="Training")):
-                # if i > 100: # debug 100 batches
-                #     break
                 if len(e2_list) == 0:
                     continue
 
@@ -351,6 +367,11 @@ class CBR(object):
                 programs, labels = self.get_training_data(e1,
                                                           all_uniq_programs,
                                                           e2_list)
+                if self.args.dropout > 0:
+                    num_programs = int(len(all_uniq_programs)*(1-self.args.dropout))
+                    selected_programs = np.random.choice(len(all_uniq_programs), num_programs)
+                    all_uniq_programs = [all_uniq_programs[i] for i in
+                                         selected_programs]
                 if len(programs) == 0:
                     continue
                 scores = self.path_scorer(programs, self.rel_vocab[r])
@@ -361,18 +382,36 @@ class CBR(object):
                 optimizer.step()
 
                 if i %100 == 0:
-                    print("Batch {}\t Loss = {}".format(i, l.detach().cpu().numpy()))
+                    print("Batch {}\t Loss = {}".format(i, l.detach().cpu().numpy()))                  
+                if i%1000 == 0:
+                    metrics = self.do_symbolic_case_based_reasoning()
+                    print('Metrics after batch {} = {}'.format(i, metrics))
+                    best_mrr = max(best_mrr, metrics['mrr'])
+                    metrics['best_mrr'] = best_mrr
+                    if self.args.use_wandb:
+                        metrics['epoch'] = epoch
+                        wandb.log(metrics)
             model_path = \
-                 os.path.join(self.args.output_dir,self.args.dataset_name,'pathscorer',
+                 os.path.join(self.args.output_dir,self.run_id,self.args.dataset_name,'pathscorer',
                                       'model.pt')
             os.makedirs(os.path.dirname(model_path), exist_ok=True)
             torch.save(self.path_scorer.state_dict(), model_path)
             metrics = self.do_symbolic_case_based_reasoning()
+            best_mrr = max(best_mrr, metrics['mrr'])
             logger.info('Metrics after epoch {} = {}'.format(epoch,metrics)) 
+            # eval without dropout
+            train_metrics = self.do_symbolic_case_based_reasoning(split= 'train')
+            logger.info('Metrics on training set after epoch {} = {}'.format(epoch,
+                                                                             train_metrics)) 
+            metrics['train_metrics'] = train_metrics
+            metrics['best_mrr'] = best_mrr
+            if self.args.use_wandb:
+                metrics['epoch'] = epoch
+                wandb.log(metrics)
 
 
 
-    def do_symbolic_case_based_reasoning(self):
+    def do_symbolic_case_based_reasoning(self, split='eval'):
         num_programs = []
         num_answers = []
         all_acc = []
@@ -382,31 +421,38 @@ class CBR(object):
         per_relation_query_count = {}
         total_examples = 0
         learnt_programs = defaultdict(lambda: defaultdict(int))  # for each query relation, a map of programs to count
-        model_path = os.path.join(self.args.output_dir, self.args.dataset_name, 'pathscorer',
+        model_path = os.path.join(self.args.output_dir, self.run_id,
+                                  self.args.dataset_name, 'pathscorer',
                                   'model.pt')
-        self.path_scorer.load_state_dict(torch.load(model_path))
-        for _, ((e1, r), e2_list) in enumerate(tqdm((self.eval_map.items()))):
+        if os.path.exists(model_path):
+            self.path_scorer.load_state_dict(torch.load(model_path))
+        if split == 'eval':
+            eval_map = self.eval_map
+        else:
+            eval_map = self.train_map
+
+        for _, ((e1, r), e2_list) in enumerate(tqdm((eval_map.items()))):
             # if e2_list is in train list then remove them
             # Normally, this shouldnt happen at all, but this happens for Nell-995.
-            orig_train_e2_list = self.train_map[(e1, r)]
+            orig_train_e2_list = self.full_map[(e1, r)]
             temp_train_e2_list = []
             for e2 in orig_train_e2_list:
                 if e2 in e2_list:
                     continue
                 temp_train_e2_list.append(e2)
-            self.train_map[(e1, r)] = temp_train_e2_list
+            self.full_map[(e1, r)] = temp_train_e2_list
             # also remove (e2, r^-1, e1)
             r_inv = get_inv_relation(r, args.dataset_name)
             temp_map = {}  # map from (e2, r_inv) -> outgoing nodes
             for e2 in e2_list:
-                temp_map[(e2, r_inv)] = self.train_map[e2, r_inv]
+                temp_map[(e2, r_inv)] = self.full_map[e2, r_inv]
                 temp_list = []
-                for e1_dash in self.train_map[e2, r_inv]:
+                for e1_dash in self.full_map[e2, r_inv]:
                     if e1_dash == e1:
                         continue
                     else:
                         temp_list.append(e1_dash)
-                self.train_map[e2, r_inv] = temp_list
+                self.full_map[e2, r_inv] = temp_list
 
             total_examples += len(e2_list)
             all_programs = self.get_programs_from_nearest_neighbors(e1, r, self.get_nearest_neighbor_inner_product,
@@ -438,6 +484,9 @@ class CBR(object):
             # answers, not_executed_programs = self.execute_programs(e1, all_uniq_programs)
 
             # answers = self.rank_answers(answers)
+            answers_cbr, not_executed_programs = self.execute_programs(e1, all_uniq_programs)
+            answers_cbr = self.rank_answers(answers_cbr)
+
 
             entity_paths = self.get_entity_programs(e1, all_uniq_programs)
             answers = []
@@ -450,12 +499,14 @@ class CBR(object):
                 for e, score in zip(entities, path_scores):
                     answers.append((e, score))
                 answers.sort(key = lambda x:-x[1])
-
-
+            
 
             if len(answers) > 0:
                 acc = self.get_accuracy(e2_list, [k[0] for k in answers])
                 _10, _5, _3, _1, rr = self.get_hits([k[0] for k in answers], e2_list, query=(e1, r))
+                _10cbr, _5cbr, _3cbr, _1cbr, rrcbr = self.get_hits([k[0] for k
+                                                                    in
+                                                                    answers_cbr], e2_list, query=(e1, r))
                 hits_10 += _10
                 hits_5 += _5
                 hits_3 += _3
@@ -476,9 +527,9 @@ class CBR(object):
             all_acc += acc
             num_answers.append(len(answers))
             # put it back
-            self.train_map[(e1, r)] = orig_train_e2_list
+            self.full_map[(e1, r)] = orig_train_e2_list
             for e2 in e2_list:
-                self.train_map[(e2, r_inv)] = temp_map[(e2, r_inv)]
+                self.full_map[(e2, r_inv)] = temp_map[(e2, r_inv)]
 
         if args.output_per_relation_scores:
             for r, r_scores in per_relation_scores.items():
@@ -530,7 +581,7 @@ class CBR(object):
                            'total' : total_examples}
                 json.dump(results, f)
                 
-        if self.args.use_wandb:
+        if self.args.use_wandb and self.args.test:
             # Log all metrics
             wandb.log({'hits_1': hits_1 / total_examples, 'hits_3': hits_3 / total_examples,
                        'hits_5': hits_5 / total_examples, 'hits_10': hits_10 / total_examples,
@@ -564,7 +615,8 @@ def main(args):
 
     entity_vocab, rev_entity_vocab, rel_vocab, rev_rel_vocab = create_vocab(kg_file)
     logger.info("Loading train map")
-    train_map = load_data(kg_file)
+    full_map = load_data(kg_file)
+    train_map = load_data(args.train_file)
     logger.info("Loading dev map")
     dev_map = load_data(args.dev_file)
     logger.info("Loading test map")
@@ -594,10 +646,6 @@ def main(args):
 
     rel_ent_map = get_entities_group_by_relation(args.train_file)
     # Calculate nearest neighbors
-    adj_mat = read_graph_sparse(kg_file, entity_vocab, rel_vocab, args.ngrams,
-                               args.use_entities)
-    adj_mat = np.sqrt(adj_mat)
-    adj_mat = normalize(adj_mat)
 
 
     # get the unique entities in eval set, so that we can calculate similarity in advance.
@@ -622,15 +670,16 @@ def main(args):
     all_kg_map = load_data_all_triples(args.train_file, args.dev_file, args.test_file)
     args.all_kg_map = all_kg_map
 
-    symbolically_smart_agent = CBR(args, train_map, eval_map, entity_vocab, rev_entity_vocab, rel_vocab,
+    symbolically_smart_agent = CBR(args, full_map, train_map, eval_map, entity_vocab, rev_entity_vocab, rel_vocab,
                                                  rev_rel_vocab, eval_vocab,
                                    eval_rev_vocab, train_adj_list, rel_ent_map)
 
     # Calculate similarity
     logger.info('calculating similarity')
-    nearest_neighbor_1_hop = symbolically_smart_agent.calc_sim(adj_mat, 
+    nearest_neighbor_1_hop = symbolically_smart_agent.calc_sim(kg_file, 
                                           np.arange(len(entity_vocab)))  # n X N (n== size of dev_entities, N: size of all entities)
-   # nearest_neighbor_1_hop = np.argsort(-sim.toarray(), axis=-1)
+    print(nearest_neighbor_1_hop)
+    print(nearest_neighbor_1_hop.shape)
     symbolically_smart_agent.set_nearest_neighbor_1_hop(nearest_neighbor_1_hop)
 
     logger.info("Loaded...")
@@ -645,13 +694,15 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run CBR")
     parser.add_argument("--dataset_name", type=str, help="The dataset name. Replace with one of FB122 | WN18RR | NELL-995 to reproduce the results of the paper")
     parser.add_argument("--data_dir", type=str, default="./cbr-akbc-data/")
-    parser.add_argument("--output_dir", type=str, default="./output/")
+    parser.add_argument("--output_dir", type=str,
+                        default="/mnt/nfs/work1/mccallum/dswarupogguv/cbr_lse/output/")
     parser.add_argument("--test", action="store_true")
     parser.add_argument("--parallelize", action="store_true")
     parser.add_argument("--test_file_name", type=str, default='')
     parser.add_argument("--max_num_programs", type=int, default=15, help="Max number of paths to consider")
     parser.add_argument("--splitid", type=int, default=0, help="Split number")
     parser.add_argument("--train", type=int, default=0, help="Train or test")
+    parser.add_argument("--dropout", type=float, default=0, help="Fraction of paths to drop")
     parser.add_argument("--num_splits", type=int, default=20, help="Total "
                                                     "number of workers")
     parser.add_argument("--print_paths", action="store_true")
