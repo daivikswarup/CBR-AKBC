@@ -31,6 +31,7 @@ formatter = logging.Formatter("[%(asctime)s \t %(message)s]",
 ch.setFormatter(formatter)
 logger.addHandler(ch)
 
+rng = np.random.default_rng()
 
 class CBR(object):
     def __init__(self, args, full_map, train_map, eval_map, entity_vocab, rev_entity_vocab, rel_vocab, rev_rel_vocab, eval_vocab,
@@ -51,7 +52,8 @@ class CBR(object):
                                                                      entity_vocab,
                                                                      rel_vocab)
         self.path_scorer = PathScorer(len(self.entity_vocab),
-                                      len(self.rel_vocab), 128)
+                                      len(self.rel_vocab), args.dim,
+                                      args.num_layers)
         self.path_scorer.cuda()
 
     @staticmethod
@@ -209,7 +211,9 @@ class CBR(object):
             return []
         if len(next_entities) > max_branch:
             # select max_branch random entities
-            next_entities = np.random.choice(next_entities, max_branch, replace=False).tolist()
+            # next_entities = np.random.choice(next_entities, max_branch, replace=False).tolist()
+            next_entities = rng.choice(next_entities, max_branch, replace=False).tolist()
+
         answers = []
         for e_next in next_entities:
             answers += self.execute_one_program(e_next, path, depth + 1, max_branch)
@@ -297,7 +301,7 @@ class CBR(object):
                 all_acc.append(0.0)
         return all_acc
 
-    def execute_program_ents(self, ent,  program, max_branch=20):
+    def execute_program_ents(self, ent,  program, max_branch=1000):
         q = deque()
         solutions = defaultdict(list)
         q.append((ent, 0, []))
@@ -310,7 +314,7 @@ class CBR(object):
             rel = program[depth]
             next_entities = self.full_map[e1, rel]
             if len(next_entities) > max_branch:
-                next_entities = np.random.choice(next_entities, max_branch,
+                next_entities = rng.choice(next_entities, max_branch,
                                                  replace=False)
             depth += 1
             for e2 in next_entities:
@@ -360,6 +364,10 @@ class CBR(object):
                 for p in all_programs:
                     if len(p) == 1 and p[0] == r:
                         continue
+                    # skip this path
+                    if p == ('treats', 'treated_by', 'treats'):
+                        continue
+                    print(p)
                     temp.append(p)
                 all_programs = temp
                 all_uniq_programs = \
@@ -369,7 +377,7 @@ class CBR(object):
                                                           e2_list)
                 if self.args.dropout > 0:
                     num_programs = int(len(all_uniq_programs)*(1-self.args.dropout))
-                    selected_programs = np.random.choice(len(all_uniq_programs), num_programs)
+                    selected_programs = rng.choice(len(all_uniq_programs), num_programs)
                     all_uniq_programs = [all_uniq_programs[i] for i in
                                          selected_programs]
                 if len(programs) == 0:
@@ -714,8 +722,14 @@ if __name__ == '__main__':
                         help="Use neighboring entities for similarity")
     parser.add_argument("--n_paths", type=int, default=1000,
                         help="Number of paths")
-    parser.add_argument("--bsize", type=int, default=64,
+    parser.add_argument("--bsize", type=int, default=4,
                         help="Number of paths")
+    parser.add_argument("--num_epochs", type=int, default=5,
+                        help="Number of epochs")
+    parser.add_argument("--dim", type=int, default=128,
+                        help="LSTM hidden dimension")
+    parser.add_argument("--num_layers", type=int, default=2,
+                        help="Number of Layers in the LSTM")
     parser.add_argument("--use_wandb", type=int, choices=[0, 1], default=0, help="Set to 1 if using W&B")
     parser.add_argument("--output_per_relation_scores", action="store_true")
 
