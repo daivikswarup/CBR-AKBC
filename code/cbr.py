@@ -53,7 +53,7 @@ class CBR(object):
                                                                      rel_vocab)
         self.path_scorer = PathScorer(len(self.entity_vocab),
                                       len(self.rel_vocab), args.dim,
-                                      args.num_layers)
+                                      args.num_layers, args.max_path_batch)
         self.path_scorer.cuda()
 
     @staticmethod
@@ -196,11 +196,12 @@ class CBR(object):
         sorted_programs = [k for (k, v) in sorted_programs]
         return sorted_programs
 
-    def execute_one_program(self, e: str, path: List[str], depth: int, max_branch: int):
+    def execute_one_program(self, e: str, path: List[str], depth: int):
         """
         starts from an entity and executes the path by doing depth first search. If there are multiple edges with the same label, we consider
         max_branch number.
         """
+        max_branch = self.args.max_branch
         if depth == len(path):
             # reached end, return node
             return [e]
@@ -216,11 +217,10 @@ class CBR(object):
 
         answers = []
         for e_next in next_entities:
-            answers += self.execute_one_program(e_next, path, depth + 1, max_branch)
+            answers += self.execute_one_program(e_next, path, depth + 1)
         return answers
 
-    def execute_programs(self, e: str, path_list: List[List[str]], max_branch:
-                         Optional[int] = 20) -> List[str]:
+    def execute_programs(self, e: str, path_list: List[List[str]]) -> List[str]:
 
         all_answers = []
         not_executed_paths = []
@@ -229,7 +229,7 @@ class CBR(object):
         for path in path_list:
             if executed_path_counter == self.args.max_num_programs:
                 break
-            ans = self.execute_one_program(e, path, depth=0, max_branch=max_branch)
+            ans = self.execute_one_program(e, path, depth=0)
             if ans == []:
                 not_executed_paths.append(path)
                 execution_fail_counter += 1
@@ -301,7 +301,8 @@ class CBR(object):
                 all_acc.append(0.0)
         return all_acc
 
-    def execute_program_ents(self, ent,  program, max_branch=1000):
+    def execute_program_ents(self, ent,  program):
+        max_branch = self.args.max_branch
         q = deque()
         solutions = defaultdict(list)
         q.append((ent, 0, []))
@@ -365,9 +366,8 @@ class CBR(object):
                     if len(p) == 1 and p[0] == r:
                         continue
                     # skip this path
-                    if p == ('treats', 'treated_by', 'treats'):
-                        continue
-                    print(p)
+                    # if tuple(p) == ('treats', 'treated_by', 'treats'):
+                    #    continue
                     temp.append(p)
                 all_programs = temp
                 all_uniq_programs = \
@@ -722,6 +722,8 @@ if __name__ == '__main__':
                         help="Use neighboring entities for similarity")
     parser.add_argument("--n_paths", type=int, default=1000,
                         help="Number of paths")
+    parser.add_argument("--max_branch", type=int, default=20,
+                        help="max_branch")
     parser.add_argument("--bsize", type=int, default=4,
                         help="Number of paths")
     parser.add_argument("--num_epochs", type=int, default=5,
@@ -730,6 +732,8 @@ if __name__ == '__main__':
                         help="LSTM hidden dimension")
     parser.add_argument("--num_layers", type=int, default=2,
                         help="Number of Layers in the LSTM")
+    parser.add_argument("--max_path_batch", type=int, default = 64,
+                        help="number of paths to encode at a time in the rnn")
     parser.add_argument("--use_wandb", type=int, choices=[0, 1], default=0, help="Set to 1 if using W&B")
     parser.add_argument("--output_per_relation_scores", action="store_true")
 
