@@ -431,9 +431,21 @@ class CBR(object):
         else:
             eval_map = self.train_map
 
+
+        all_data = []
+
+
+
         for _, ((e1, r), e2_list) in enumerate(tqdm((eval_map.items()))):
             # if e2_list is in train list then remove them
             # Normally, this shouldnt happen at all, but this happens for Nell-995.
+
+            query_data = {
+                    'e1' : e1,
+                    'r' : r,
+                    'answers' : e2_list
+            }
+
             orig_train_e2_list = self.full_map[(e1, r)]
             temp_train_e2_list = []
             for e2 in orig_train_e2_list:
@@ -476,6 +488,8 @@ class CBR(object):
             all_uniq_programs = \
                 self.rank_programs(all_programs)[:self.args.max_num_programs]
 
+            query_data['programs'] = all_uniq_programs
+
             for u_p in all_uniq_programs:
                 learnt_programs[r][u_p] += 1
 
@@ -489,7 +503,11 @@ class CBR(object):
 
 
             entity_paths = self.get_entity_programs(e1, all_uniq_programs)
+
+            query_data['entity_paths'] = dict(entity_paths)
+
             answers = []
+
             if len(entity_paths) > 0:
                 rel_id = self.rel_vocab[r]
                 entities = [e for e, p in entity_paths.items()]
@@ -499,6 +517,9 @@ class CBR(object):
                 for e, score in zip(entities, path_scores):
                     answers.append((e, score))
                 answers.sort(key = lambda x:-x[1])
+
+            query_data['predicted_answers'] = [(e, float(score)) for e, score
+                                               in answers ] # to save as json
             
 
             if len(answers) > 0:
@@ -531,6 +552,8 @@ class CBR(object):
             for e2 in e2_list:
                 self.full_map[(e2, r_inv)] = temp_map[(e2, r_inv)]
 
+            all_data.append(query_data)
+
         if args.output_per_relation_scores:
             for r, r_scores in per_relation_scores.items():
                 r_scores["hits_1"] /= per_relation_query_count[r]
@@ -559,6 +582,11 @@ class CBR(object):
         logger.info("Avg num of returned nearest neighbors: {:2.4f}".format(np.mean(self.all_num_ret_nn)))
         logger.info("Avg number of programs that do not execute per query: {:2.4f}".format(
             np.mean(self.num_non_executable_programs)))
+
+        if self.args.dump_paths:
+            with open('data.json', 'w') as f:
+                json.dump(all_data, f, indent=4)
+
         if self.args.print_paths:
             for k, v in learnt_programs.items():
                 logger.info("query: {}".format(k))
@@ -633,7 +661,10 @@ def main(args):
                                 args.dataset_name)
         if os.path.exists(dirname):
             for fil in os.listdir(dirname):
-                fid = int(fil.split('.')[0])
+                try:
+                    fid = int(fil.split('.')[0])
+                except:
+                    continue
                 if fid >= args.num_splits:
                     os.remove(os.path.join(dirname, fil))
                  
@@ -706,6 +737,7 @@ if __name__ == '__main__':
     parser.add_argument("--num_splits", type=int, default=20, help="Total "
                                                     "number of workers")
     parser.add_argument("--print_paths", action="store_true")
+    parser.add_argument("--dump_paths", action="store_true")
     parser.add_argument("--k_adj", type=int, default=5,
                         help="Number of nearest neighbors to consider based on adjacency matrix")
     parser.add_argument("--ngrams", type=int, default=2,
